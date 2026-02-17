@@ -80,7 +80,7 @@ You'll be prompted for:
 The agent saves progress after every sub-step. If it gets interrupted (Ctrl+C, crash, timeout), resume from exactly where it left off:
 
 ```bash
-python -m dev_agent --resume --project-dir /path/to/project
+python -m dev_agent --resume --project-dir projects/my-cool-app
 ```
 
 ### Use an Existing Repository
@@ -101,17 +101,21 @@ python -m dev_agent --repo owner/repo-name
 ## Project Structure
 
 ```
-dev_agent/
-  __init__.py            # Package marker
-  __main__.py            # CLI entry point and pipeline orchestration
-  config.py              # AgentConfig dataclass (timeouts, retries, settings)
-  state.py               # AgentState + IssueState with atomic JSON persistence
-  cli_bridge.py          # Subprocess interface for claude, git, and gh CLIs
-  planner.py             # Plan generation and issues JSON creation
-  repo_manager.py        # Repo creation, scaffolding, staging branch
-  issue_processor.py     # Main issue processing loop and phase merges
-  conflict_resolver.py   # Merge conflict detection and Claude-based resolution
-  prompts.py             # All prompt templates
+Build-app-like-pro/
+  dev_agent/
+    __init__.py            # Package marker
+    __main__.py            # CLI entry point and pipeline orchestration
+    config.py              # AgentConfig dataclass (timeouts, retries, settings)
+    state.py               # AgentState + IssueState with atomic JSON persistence
+    cli_bridge.py          # Subprocess interface for claude, git, and gh CLIs
+    planner.py             # Plan generation and issues JSON creation
+    repo_manager.py        # Repo creation, scaffolding, staging branch
+    issue_processor.py     # Main issue processing loop and phase merges
+    conflict_resolver.py   # Merge conflict detection and Claude-based resolution
+    prompts.py             # All prompt templates
+  projects/                # All generated apps are created here
+    my-cool-app/           # Example: a project built by the agent
+    another-project/
 ```
 
 ## Branching Strategy

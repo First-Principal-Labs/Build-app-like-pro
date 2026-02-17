@@ -325,6 +325,12 @@ def git_current_branch(cwd: str) -> str:
     return git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
 
 
+def git_diff_branch(base: str, head: str, cwd: str) -> str:
+    """Return the diff between two branches (base...head)."""
+    result = _run(["git", "diff", f"{base}...{head}"], cwd=cwd, check=False)
+    return result.stdout
+
+
 # --- GitHub (gh) calls ---
 
 

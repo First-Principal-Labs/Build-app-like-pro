@@ -19,12 +19,19 @@ from .cli_bridge import (
     git_add_all,
     git_checkout,
     git_commit,
+    git_diff_branch,
     git_has_changes,
     git_merge,
     git_push,
 )
 from .conflict_resolver import resolve_conflicts
-from .prompts import format_issue_body, implement_issue_prompt, review_pr_prompt
+from .prompts import (
+    format_issue_body,
+    generate_phase_pr_body_prompt,
+    generate_pr_body_prompt,
+    implement_issue_prompt,
+    review_pr_prompt,
+)
 from .state import AgentState, IssueState, StepStatus
 
 logger = logging.getLogger(__name__)
@@ -97,7 +104,7 @@ def process_all_issues(
 
         # Phase complete — merge staging into main
         if phase_num not in state.phases_merged:
-            _merge_phase_to_main(state, phase_num, state_path, cwd)
+            _merge_phase_to_main(state, phase_num, state_path, cwd, issues_data)
 
 
 def _process_single_issue(
@@ -189,12 +196,25 @@ def _process_single_issue(
         state.save(state_path)
         logger.info("  Changes committed and pushed")
 
-    # Step 5: Create PR
+    # Step 5: Create PR with Claude-generated description
     if not issue_state.past_step("pr_created"):
-        pr_body = (
-            f"Implements #{issue_state.github_issue_number}\n\n"
-            f"{issue_data.get('description', '')}"
+        diff_text = git_diff_branch("staging", issue_state.branch_name, cwd)
+
+        # Truncate large diffs to fit prompt limits
+        if len(diff_text) > 15000:
+            diff_text = diff_text[:15000] + "\n... [truncated]"
+
+        issue_body = format_issue_body(issue_data)
+        pr_body_prompt = generate_pr_body_prompt(
+            issue_title=issue_data["title"],
+            issue_body=issue_body,
+            diff_text=diff_text,
         )
+        pr_body = claude_generate(pr_body_prompt, cwd=cwd, timeout=120)
+
+        # Prepend the issue reference
+        pr_body = f"Implements #{issue_state.github_issue_number}\n\n{pr_body}"
+
         pr_number = gh_pr_create(
             title=issue_data["title"],
             body=pr_body,
@@ -295,14 +315,31 @@ def _merge_phase_to_main(
     phase_num: int,
     state_path: str,
     cwd: str,
+    issues_data: list[dict] | None = None,
 ) -> None:
     """After all issues in a phase complete, merge staging -> main via PR."""
     logger.info("\n  Merging Phase %d: staging -> main", phase_num)
 
+    # Generate a proper PR body using Claude
+    diff_text = git_diff_branch("main", "staging", cwd)
+    if len(diff_text) > 15000:
+        diff_text = diff_text[:15000] + "\n... [truncated]"
+
+    phase_issues = []
+    if issues_data:
+        phase_issues = [iss for iss in issues_data if iss["phase"] == phase_num]
+
+    pr_body_prompt = generate_phase_pr_body_prompt(
+        phase_num=phase_num,
+        phase_issues=phase_issues,
+        diff_text=diff_text,
+    )
+    pr_body = claude_generate(pr_body_prompt, cwd=cwd, timeout=120)
+
     # Create PR from staging to main
     pr_number = gh_pr_create(
         title=f"Phase {phase_num} complete — merge to main",
-        body=f"Merging all Phase {phase_num} features from staging into main.",
+        body=pr_body,
         base="main",
         head="staging",
         cwd=cwd,

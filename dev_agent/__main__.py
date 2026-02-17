@@ -74,9 +74,11 @@ def main() -> None:
         if args.project_dir:
             project_dir = args.project_dir
         else:
-            # Default: create under the same parent as this script
+            # Default: create under the projects/ directory
             base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            project_dir = os.path.join(base, repo_name)
+            projects_dir = os.path.join(base, "projects")
+            os.makedirs(projects_dir, exist_ok=True)
+            project_dir = os.path.join(projects_dir, repo_name)
 
         state = AgentState(
             project_idea=idea,

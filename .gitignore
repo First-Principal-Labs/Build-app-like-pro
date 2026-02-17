@@ -32,4 +32,5 @@ node_modules/
 .env
 .env.local
 
-ML-Playground/
+# Generated projects (each app built by the agent lives here)
+projects/*/
