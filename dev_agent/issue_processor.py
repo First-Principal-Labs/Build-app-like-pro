@@ -14,7 +14,9 @@ from .cli_bridge import (
     gh_issue_create,
     gh_pr_create,
     gh_pr_diff,
+    gh_pr_edit,
     gh_pr_merge,
+    gh_pr_view,
     git,
     git_add_all,
     git_checkout,
@@ -26,6 +28,8 @@ from .cli_bridge import (
 )
 from .conflict_resolver import resolve_conflicts
 from .prompts import (
+    execute_test_plan_prompt,
+    fix_failing_tests_prompt,
     format_issue_body,
     generate_phase_pr_body_prompt,
     generate_pr_body_prompt,
@@ -56,6 +60,113 @@ def get_existing_files_summary(project_dir: str) -> str:
             rel_path = os.path.relpath(os.path.join(root, fname), project_dir)
             files.append(rel_path)
     return "\n".join(f"- {f}" for f in sorted(files))
+
+
+def _extract_test_items(pr_body: str) -> list[str]:
+    """Extract test plan checkbox items from the PR body markdown.
+
+    Looks for the '# Test Plan' section and extracts all '- [ ]' items.
+    """
+    lines = pr_body.split("\n")
+    in_test_plan = False
+    items: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^#{1,3}\s+Test Plan", stripped, re.IGNORECASE):
+            in_test_plan = True
+            continue
+        if in_test_plan and re.match(r"^#{1,3}\s+", stripped):
+            break
+        if in_test_plan:
+            match = re.match(r"^-\s*\[[ x]\]\s*(.+)", stripped)
+            if match:
+                items.append(match.group(1).strip())
+
+    return items
+
+
+def _parse_test_results(claude_output: str) -> list[dict]:
+    """Parse the TEST_RESULTS_START...TEST_RESULTS_END block from Claude's output.
+
+    Returns a list of dicts with keys: number, status, description, reason.
+    """
+    results: list[dict] = []
+
+    match = re.search(
+        r"TEST_RESULTS_START\s*\n(.*?)\nTEST_RESULTS_END",
+        claude_output,
+        re.DOTALL,
+    )
+    if not match:
+        logger.warning("  No TEST_RESULTS block found in Claude output")
+        return results
+
+    block = match.group(1).strip()
+    for line in block.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        line_match = re.match(
+            r"(\d+)\.\s*(PASS|FAIL|SKIP)\s*\|\s*(.+?)(?:\s*\|\s*(.+))?$",
+            line,
+        )
+        if line_match:
+            results.append({
+                "number": int(line_match.group(1)),
+                "status": line_match.group(2),
+                "description": line_match.group(3).strip(),
+                "reason": (line_match.group(4) or "").strip(),
+            })
+        else:
+            logger.warning("  Could not parse test result line: %s", line)
+
+    return results
+
+
+def _update_pr_body_with_results(
+    pr_body: str,
+    test_items: list[str],
+    results: list[dict],
+) -> str:
+    """Update PR body checkboxes based on test results."""
+    status_map: dict[str, dict] = {}
+    for r in results:
+        idx = r["number"] - 1
+        if 0 <= idx < len(test_items):
+            status_map[test_items[idx]] = r
+
+    lines = pr_body.split("\n")
+    updated_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        match = re.match(r"^(-\s*)\[[ x]\]\s*(.+)", stripped)
+        if match:
+            prefix = match.group(1)
+            item_text = match.group(2).strip()
+            # Strip any previous annotations before matching
+            clean_text = re.sub(r"\s*\*\*\[(FAILED|SKIPPED):.*?\]\*\*$", "", item_text).strip()
+            result = status_map.get(clean_text)
+            if result:
+                if result["status"] == "PASS":
+                    updated_lines.append(f"{prefix}[x] {clean_text}")
+                elif result["status"] == "FAIL":
+                    updated_lines.append(
+                        f"{prefix}[ ] {clean_text} **[FAILED: {result['reason']}]**"
+                    )
+                elif result["status"] == "SKIP":
+                    updated_lines.append(
+                        f"{prefix}[ ] {clean_text} **[SKIPPED: {result['reason']}]**"
+                    )
+                else:
+                    updated_lines.append(line)
+            else:
+                updated_lines.append(line)
+        else:
+            updated_lines.append(line)
+
+    return "\n".join(updated_lines)
 
 
 def process_all_issues(
@@ -247,7 +358,109 @@ def _process_single_issue(
         issue_state.sub_step = "pr_reviewed"
         state.save(state_path)
 
-    # Step 7: Merge PR
+    # Step 7: Execute test plan
+    if not issue_state.past_step("tests_passed"):
+        git_checkout(issue_state.branch_name, cwd)
+
+        pr_body = gh_pr_view(issue_state.pr_number, cwd)
+        test_items = _extract_test_items(pr_body)
+
+        if not test_items:
+            logger.warning("  No test plan items found in PR body, skipping test execution")
+        else:
+            logger.info("  Found %d test plan items, executing...", len(test_items))
+
+            for attempt in range(max_retries + 1):
+                test_prompt = execute_test_plan_prompt(
+                    test_items=test_items,
+                    project_description=(
+                        f"{issue_data['title']}: {issue_data.get('description', '')}"
+                    ),
+                    tech_stack=state.tech_stack,
+                )
+
+                try:
+                    test_output = claude_code_implement(
+                        test_prompt, cwd=cwd, timeout=1800,
+                    )
+                except Exception as e:
+                    logger.error("  Test execution failed with error: %s", e)
+                    test_output = ""
+
+                results = _parse_test_results(test_output)
+
+                if not results:
+                    logger.warning(
+                        "  Could not parse test results (attempt %d/%d)",
+                        attempt + 1, max_retries + 1,
+                    )
+                    if attempt == max_retries:
+                        logger.warning("  Max retries with unparseable results, proceeding")
+                        break
+                    continue
+
+                passed = [r for r in results if r["status"] == "PASS"]
+                failed = [r for r in results if r["status"] == "FAIL"]
+                skipped = [r for r in results if r["status"] == "SKIP"]
+
+                logger.info(
+                    "  Test results: %d passed, %d failed, %d skipped",
+                    len(passed), len(failed), len(skipped),
+                )
+
+                # Update PR body with results
+                pr_body = gh_pr_view(issue_state.pr_number, cwd)
+                updated_body = _update_pr_body_with_results(pr_body, test_items, results)
+                gh_pr_edit(issue_state.pr_number, cwd, updated_body)
+                logger.info("  Updated PR body with test results")
+
+                if not failed:
+                    logger.info("  All tests passed!")
+                    break
+
+                if attempt < max_retries:
+                    logger.info(
+                        "  %d test(s) failed, attempting fix (attempt %d/%d)...",
+                        len(failed), attempt + 1, max_retries,
+                    )
+
+                    fix_prompt = fix_failing_tests_prompt(
+                        failing_tests=[
+                            {"description": r["description"], "reason": r["reason"]}
+                            for r in failed
+                        ],
+                        project_description=(
+                            f"{issue_data['title']}: {issue_data.get('description', '')}"
+                        ),
+                        tech_stack=state.tech_stack,
+                    )
+
+                    try:
+                        claude_code_implement(fix_prompt, cwd=cwd, timeout=600)
+                    except Exception as e:
+                        logger.error("  Fix attempt failed: %s", e)
+
+                    if git_has_changes(cwd):
+                        git_add_all(cwd)
+                        git_commit(
+                            f"Fix failing tests (attempt {attempt + 1}): "
+                            f"{issue_data['title']}",
+                            cwd,
+                        )
+                        git_push(cwd, issue_state.branch_name)
+                        logger.info("  Fix committed and pushed")
+                    else:
+                        logger.warning("  No changes after fix attempt")
+                else:
+                    logger.warning(
+                        "  %d test(s) still failing after %d retries, proceeding",
+                        len(failed), max_retries,
+                    )
+
+        issue_state.sub_step = "tests_passed"
+        state.save(state_path)
+
+    # Step 8: Merge PR (only after tests pass)
     if not issue_state.past_step("pr_merged"):
         try:
             gh_pr_merge(
@@ -269,7 +482,7 @@ def _process_single_issue(
         state.save(state_path)
         logger.info("  PR merged into staging")
 
-    # Step 8: Close issue
+    # Step 9: Close issue
     if not issue_state.past_step("issue_closed"):
         gh_issue_close(
             issue_state.github_issue_number,

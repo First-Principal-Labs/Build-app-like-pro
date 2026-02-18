@@ -24,6 +24,7 @@ SUB_STEPS = [
     "committed",
     "pr_created",
     "pr_reviewed",
+    "tests_passed",
     "pr_merged",
     "issue_closed",
 ]

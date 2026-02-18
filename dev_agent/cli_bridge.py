@@ -406,6 +406,24 @@ def gh_pr_diff(pr_number: int, cwd: str) -> str:
     return result.stdout
 
 
+def gh_pr_view(pr_number: int, cwd: str) -> str:
+    """Fetch the PR body (description) as raw text."""
+    result = _run(
+        ["gh", "pr", "view", str(pr_number), "--json", "body", "--jq", ".body"],
+        cwd=cwd,
+    )
+    return result.stdout.strip()
+
+
+def gh_pr_edit(pr_number: int, cwd: str, body: str) -> str:
+    """Update the PR body with new content."""
+    result = _run(
+        ["gh", "pr", "edit", str(pr_number), "--body", body],
+        cwd=cwd,
+    )
+    return result.stdout.strip()
+
+
 def gh_issue_close(
     issue_number: int, cwd: str, comment: str = ""
 ) -> str:

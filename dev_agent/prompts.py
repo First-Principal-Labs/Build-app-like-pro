@@ -377,3 +377,88 @@ Feature being implemented: {feature_description}
 
 Output the resolved file now:
 """
+
+
+def execute_test_plan_prompt(
+    test_items: list[str],
+    project_description: str,
+    tech_stack: str,
+) -> str:
+    numbered_items = "\n".join(f"{i+1}. {item}" for i, item in enumerate(test_items))
+    return f"""You are a QA engineer executing a test plan for a project.
+
+## Project
+{project_description}
+
+## Tech Stack
+{tech_stack}
+
+## Test Plan Items to Execute
+{numbered_items}
+
+## Instructions
+For EACH test item above, you must actually execute it — not just describe what you would do.
+
+### How to Test
+- For web applications: Start the dev server (if not already running), then use curl, wget, or a browser automation tool (such as Playwright) to verify behavior. Kill the server when done.
+- For APIs: Make actual HTTP requests using curl and verify response status codes, headers, and body content.
+- For CLI tools: Run the actual commands and check output.
+- For database changes: Query the database and verify schema/data.
+- For unit tests: Run the test suite (pytest, npm test, etc.) and check results.
+- If a test requires installing dependencies first, do so.
+
+### Important Rules
+- Actually run commands and check real output. Do not simulate.
+- If a server needs to start, start it in the background, wait for it to be ready, run your tests, then stop it.
+- If a test cannot be executed in this environment (e.g., requires a physical device or browser GUI with no headless option), mark it as SKIP with a reason.
+- Keep each test isolated — do not let one test's side effects break another.
+
+### Required Output Format
+After executing all tests, you MUST output a results block in exactly this format at the END of your response:
+
+TEST_RESULTS_START
+1. PASS | <test item description>
+2. FAIL | <test item description> | <failure reason>
+3. SKIP | <test item description> | <skip reason>
+TEST_RESULTS_END
+
+The number must match the test item number from the list above.
+Every test item must have exactly one result line.
+Use ONLY these statuses: PASS, FAIL, SKIP.
+For FAIL and SKIP, include a pipe-separated reason after the description.
+
+Execute the tests now.
+"""
+
+
+def fix_failing_tests_prompt(
+    failing_tests: list[dict],
+    project_description: str,
+    tech_stack: str,
+) -> str:
+    failures_text = "\n".join(
+        f"- {t['description']}\n  Reason: {t['reason']}"
+        for t in failing_tests
+    )
+    return f"""You are fixing code that failed its test plan.
+
+## Project
+{project_description}
+
+## Tech Stack
+{tech_stack}
+
+## Failing Tests
+{failures_text}
+
+## Instructions
+1. Read the existing codebase to understand the current state.
+2. Analyze each failing test and its failure reason.
+3. Fix the code so that each failing test would pass.
+4. Do NOT change the test expectations — fix the implementation.
+5. Follow existing code conventions and patterns.
+6. Make sure the project still compiles/runs after your changes.
+7. Only modify files relevant to fixing these failures.
+
+Fix the code now.
+"""
